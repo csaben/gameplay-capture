@@ -1,0 +1,56 @@
+[project]
+name = "gamecap-pipeline"
+version = "0.1.0"
+description = "Gameplay capture processing: validate + align segments, cut clips, write WebDataset shards"
+readme = "README.md"
+authors = [
+    { name = "csaben", email = "clark@saben.org" }
+]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "av>=19.0.0",
+    "blake3>=1.0.10",
+    "boto3>=1.43.105",
+    "numpy>=2.5.3",
+    "pillow>=12.3.0",
+    "polars>=1.44.2",
+    "pyarrow>=25.0.1",
+    "webdataset>=1.0.2",
+]
+
+[project.optional-dependencies]
+# Large (several GB); only needed on the training side / for the loader example.
+train = [
+    "torch>=2.14.0",
+    "torchcodec>=0.16.0",
+]
+
+[project.scripts]
+gamecap-pipeline = "gamecap_pipeline.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.9,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "moto[server]>=5.0.0",
+]
+
+# CUDA builds of torch / torchcodec (driver on the 2x3090 box supports CUDA 13.0).
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchcodec = { index = "pytorch-cu130" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs torch/torchcodec (train extra); CUDA used when available",
+    "s3: runs against an in-process moto S3 server",
+]
