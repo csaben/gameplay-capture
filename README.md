@@ -16,9 +16,10 @@ Full spec: [docs/SPEC.md](docs/SPEC.md).
 | `crates/cap-recorder` | Ticker, bounded queues, segment writer, crash recovery |
 | `crates/cap-upload` | SQLite upload queue, S3 / presigned targets |
 | `crates/cap-app` | `gamecap` CLI ([README](crates/cap-app/README.md)) |
+| `crates/cap-gui` | `gamecap-gui` desktop app: window picker, global keyboard/gamepad hotkeys, recordings ([README](crates/cap-gui/README.md)) |
 | `server/ingest-api` | Phase 2 backend: device login, presigned URLs, deletion ([README](server/ingest-api/README.md)) |
 | `deploy/garage` | Phase 1 Garage on the tailnet ([README](deploy/garage/README.md)) |
-| `pipeline/` | Python: validate, align, clip, shard, replay, loader ([README](pipeline/README.md), [SCHEMA](pipeline/SCHEMA.md)) |
+| `pipeline/` | Python: validate, align, clip, shard, replay, loader, web viewer ([README](pipeline/README.md), [SCHEMA](pipeline/SCHEMA.md)) |
 
 ## Build
 

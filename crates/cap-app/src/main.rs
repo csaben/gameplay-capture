@@ -35,7 +35,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// List capturable windows (native id, pid, game id, title).
-    Windows,
+    Windows {
+        /// Print a JSON array instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Record a game window (or a synthetic source) into segments and upload them.
     Record(RecordArgs),
     /// Run only the upload queue: recover partials, queue finished segments, drain.
@@ -81,6 +85,12 @@ enum Cmd {
     Consent {
         #[arg(long)]
         revoke: bool,
+        /// Accept the current terms without a prompt (the GUI shows them first).
+        #[arg(long, conflicts_with = "revoke")]
+        accept: bool,
+        /// Print the terms and acceptance state as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Print the resolved paths (config, data, sessions, queue, logs).
     Paths,
@@ -124,6 +134,12 @@ struct RecordArgs {
     /// Show a tray icon (builds with feature `tray`, Windows/macOS).
     #[arg(long)]
     tray: bool,
+    /// Read control commands from stdin (`stop`, `stop-now`, `pause`; EOF stops). Used by gamecap-gui.
+    #[arg(long)]
+    control_stdin: bool,
+    /// Print JSON events (started, status every second, stopped) on stdout.
+    #[arg(long)]
+    status_json: bool,
 }
 
 fn parse_size(s: &str) -> Result<(u32, u32), String> {
@@ -179,7 +195,7 @@ fn run() -> Result<()> {
     tracing::debug!(config = %config_file.display(), "starting");
 
     match cli.cmd {
-        Cmd::Windows => record::cmd_windows(),
+        Cmd::Windows { json } => record::cmd_windows(json),
         Cmd::Record(a) => {
             let ctrlc = util::CtrlC::install()?;
             let opts = record::RecordOpts {
@@ -195,6 +211,8 @@ fn run() -> Result<()> {
                 duration: a.duration.map(Duration::from_secs),
                 drain_secs: a.drain_secs,
                 tray: a.tray,
+                control_stdin: a.control_stdin,
+                status_json: a.status_json,
             };
             record::cmd_record(&cfg, &paths, opts, ctrlc)
         }
@@ -217,7 +235,26 @@ fn run() -> Result<()> {
         }
         Cmd::Login { api_base } => login::cmd_login(&cfg, &paths, api_base.as_deref()),
         Cmd::DeleteMyData { api_base, yes } => login::cmd_delete_my_data(&cfg, &paths, api_base.as_deref(), yes),
-        Cmd::Consent { revoke } => {
+        Cmd::Consent { revoke, accept, json } => {
+            if accept {
+                consent::accept(&paths.state)?;
+            }
+            if json {
+                let st: config::State = config::load_json(&paths.state)?;
+                let v = serde_json::json!({
+                    "terms": consent::TERMS,
+                    "current_version": consent::CONSENT_VERSION,
+                    "accepted": consent::has_consent(&st),
+                    "accepted_version": st.consent_version,
+                    "accepted_at": st.consent_accepted_at,
+                });
+                println!("{v}");
+                return Ok(());
+            }
+            if accept {
+                println!("consent recorded (version {})", consent::CONSENT_VERSION);
+                return Ok(());
+            }
             if revoke {
                 consent::revoke(&paths.state)?;
                 println!("consent revoked; `gamecap record` will ask again");

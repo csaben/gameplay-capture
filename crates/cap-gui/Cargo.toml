@@ -1,0 +1,32 @@
+[package]
+name = "cap-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "gamecap-gui: desktop window picker, recorder control and global keyboard/gamepad hotkeys"
+
+[[bin]]
+name = "gamecap-gui"
+path = "src/main.rs"
+
+[dependencies]
+cap-types.workspace = true
+cap-focus.workspace = true
+cap-input = { path = "../cap-input", features = ["gamepad"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+dirs = "6"
+eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts"] }
+raw-window-handle = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }

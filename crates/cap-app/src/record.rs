@@ -36,6 +36,11 @@ pub struct RecordOpts {
     pub duration: Option<Duration>,
     pub drain_secs: Option<u64>,
     pub tray: bool,
+    /// Controlled by a parent process (gamecap-gui): read `stop`, `stop-now`
+    /// and `pause` lines from stdin (EOF = stop); never prompt on stdin.
+    pub control_stdin: bool,
+    /// Print machine-readable JSON events on stdout (one per line).
+    pub status_json: bool,
 }
 
 /// Pick the window `query` refers to: a native id (decimal or 0x hex), an
@@ -190,6 +195,8 @@ pub struct Session {
     drain: Duration,
     pub ctrlc: CtrlC,
     tty: bool,
+    status_json: bool,
+    session_id: String,
     #[cfg_attr(not(all(feature = "tray", any(windows, target_os = "macos"))), allow(dead_code))]
     pub label: String,
     _locks: Vec<File>,
@@ -211,6 +218,9 @@ impl Session {
 
         // Consent first: nothing is captured or uploaded without it.
         let state: State = crate::config::load_json(&paths.state)?;
+        if opts.control_stdin && !crate::consent::has_consent(&state) {
+            bail!("consent required: accept the terms first (`gamecap consent --accept`)");
+        }
         let state = crate::consent::ensure(&paths.state, state)?;
 
         let rt = runtime()?;
@@ -348,6 +358,23 @@ impl Session {
             eprintln!("pause key: scan code {:#04x}; Ctrl-C to stop", cfg.hotkeys.pause_key);
         }
         let drain = opts.drain_secs.or(cfg.upload.as_ref().and_then(|u| u.drain_secs)).unwrap_or(30);
+        if opts.status_json {
+            json_line(&serde_json::json!({
+                "event": "started",
+                "session": session_id,
+                "game_id": identity.game_id,
+                "title": target.title,
+                "native_id": target.native_id,
+                "width": settings.width,
+                "height": settings.height,
+                "rate_hz": settings.rate_hz,
+                "segment_secs": settings.segment_secs,
+                "dir": paths.sessions_root.join(&session_id),
+            }));
+        }
+        if opts.control_stdin {
+            spawn_stdin_control(ctrlc.clone(), pause.clone());
+        }
         Ok(Self {
             recorder: Some(recorder),
             pause,
@@ -364,6 +391,8 @@ impl Session {
             drain: Duration::from_secs(drain),
             ctrlc,
             tty: stderr_is_tty(),
+            status_json: opts.status_json,
+            session_id,
             label,
             _locks: locks,
         })
@@ -401,6 +430,34 @@ impl Session {
             self.clear_status_line();
             tracing::info!("disk usage {} below 90% of the cap: recording resumed", fmt_bytes(self.disk_used));
         }
+    }
+
+    /// The status line as a JSON object (`--status-json`).
+    pub fn status_json(&self) -> serde_json::Value {
+        let s = self.stats();
+        let slots = s.frames_written + s.frames_dropped;
+        let paused = self.pause.is_paused();
+        let queue = self.queue.as_ref().and_then(|q| q.stats().ok()).map(|q| {
+            serde_json::json!({"pending": q.pending, "uploading": q.uploading, "uploaded": q.uploaded, "verified": q.verified, "failed": q.failed})
+        });
+        serde_json::json!({
+            "event": "status",
+            "session": self.session_id,
+            "elapsed_s": self.started.elapsed().as_secs_f64(),
+            "state": if paused { "paused" } else if s.current_segment.is_some() { "recording" } else { "waiting" },
+            "pause_reasons": if paused { self.pause.describe() } else { String::new() },
+            "segment": s.current_segment,
+            "frames": s.frames_written,
+            "dropped": s.frames_dropped,
+            "dropped_pct": if slots > 0 { s.frames_dropped as f64 * 100.0 / slots as f64 } else { 0.0 },
+            "repeated_pct": s.repeated_ratio * 100.0,
+            "inputs": s.input_events,
+            "segments_done": s.segments_done,
+            "segment_errors": s.segment_errors,
+            "queue": queue,
+            "disk_used": self.disk_used,
+            "last_error": s.last_error,
+        })
     }
 
     fn clear_status_line(&self) {
@@ -448,9 +505,13 @@ impl Session {
         if self.duration.is_some_and(|d| self.started.elapsed() >= d) {
             self.ctrlc.trigger();
         }
-        let due = self.last_status.is_none_or(|t| t.elapsed() >= Duration::from_secs(if self.tty { 1 } else { 5 }));
+        let every = if self.tty || self.status_json { 1 } else { 5 };
+        let due = self.last_status.is_none_or(|t| t.elapsed() >= Duration::from_secs(every));
         if due {
             self.last_status = Some(Instant::now());
+            if self.status_json {
+                json_line(&self.status_json());
+            }
             let line = self.status_line();
             if self.tty {
                 eprint!("\r\x1b[2K{line}");
@@ -533,7 +594,20 @@ pub fn cmd_record(cfg: &Config, paths: &Paths, opts: RecordOpts, ctrlc: CtrlC) -
     while session.tick() {
         std::thread::sleep(Duration::from_millis(200));
     }
+    let status_json = opts.status_json;
     let sum = session.finish()?;
+    if status_json {
+        let s = &sum.stats;
+        json_line(&serde_json::json!({
+            "event": "stopped",
+            "segments": s.segments_done,
+            "frames": s.frames_written,
+            "dropped": s.frames_dropped,
+            "inputs": s.input_events,
+            "drained": sum.drained,
+            "outstanding": sum.queue.as_ref().map(|q| q.outstanding()),
+        }));
+    }
     if let Some(q) = &sum.queue {
         if !sum.drained || q.failed > 0 {
             eprintln!("{} segment(s) not uploaded yet, {} failed; run `gamecap upload` or `gamecap status`", q.outstanding(), q.failed);
@@ -545,11 +619,53 @@ pub fn cmd_record(cfg: &Config, paths: &Paths, opts: RecordOpts, ctrlc: CtrlC) -
     Ok(())
 }
 
+pub fn json_line(v: &serde_json::Value) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{v}");
+    let _ = out.flush();
+}
+
+/// `--control-stdin`: `stop` (or EOF) stops, `stop-now` also skips the upload
+/// drain, `pause` toggles the user pause.
+fn spawn_stdin_control(ctrlc: CtrlC, pause: PauseState) {
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            // .NET parents write a UTF-8 BOM before the first line.
+            let cmd = line.trim().trim_start_matches('\u{feff}');
+            tracing::debug!(cmd, "control");
+            match cmd {
+                "stop" => ctrlc.trigger(),
+                "stop-now" => ctrlc.trigger_again(),
+                "pause" => {
+                    let now = pause.toggle(Reason::User);
+                    tracing::info!("{} (control)", if now { "paused" } else { "resumed" });
+                }
+                "" => {}
+                other => tracing::warn!("unknown control command {other:?}"),
+            }
+        }
+        ctrlc.trigger();
+    });
+}
+
 /// `gamecap windows`.
-pub fn cmd_windows() -> Result<()> {
+pub fn cmd_windows(json: bool) -> Result<()> {
     let tracker = cap_focus::default_tracker().context("focus tracker (Linux needs an X11/XWayland DISPLAY)")?;
     let mut ws = tracker.list_windows()?;
     ws.sort_by_key(|a| a.identity.game_id.to_lowercase());
+    if json {
+        let v: Vec<_> = ws
+            .iter()
+            .map(|w| {
+                serde_json::json!({"native_id": w.native_id, "pid": w.pid, "game_id": w.identity.game_id,
+                    "publisher": w.identity.publisher, "title": w.title})
+            })
+            .collect();
+        println!("{}", serde_json::Value::Array(v));
+        return Ok(());
+    }
     println!("{:<14} {:>8}  {:<32} TITLE", "NATIVE_ID", "PID", "GAME_ID");
     for w in ws {
         let pubr = w.identity.publisher.as_deref().map(|p| format!(" [{p}]")).unwrap_or_default();

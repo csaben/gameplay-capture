@@ -53,13 +53,18 @@ pub fn prompt(state_path: &Path, input: &mut dyn BufRead, out: &mut dyn Write) -
     if !is_yes(&line) {
         bail!("consent not given: recording refused (run again and type `yes` to accept the terms)");
     }
+    let st = accept(state_path)?;
+    writeln!(out, "Consent recorded (version {CONSENT_VERSION}, {}).", st.consent_accepted_at.as_deref().unwrap_or(""))?;
+    Ok(st)
+}
+
+/// Record acceptance of the current terms.
+pub fn accept(state_path: &Path) -> Result<State> {
     let now = humantime::format_rfc3339_seconds(std::time::SystemTime::now()).to_string();
-    let st = update_state(state_path, |s| {
+    update_state(state_path, |s| {
         s.consent_version = Some(CONSENT_VERSION.into());
         s.consent_accepted_at = Some(now.clone());
-    })?;
-    writeln!(out, "Consent recorded (version {CONSENT_VERSION}, {now}).")?;
-    Ok(st)
+    })
 }
 
 /// Ensure consent, prompting on stdin if needed.

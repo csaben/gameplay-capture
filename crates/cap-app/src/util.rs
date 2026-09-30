@@ -54,6 +54,10 @@ impl CtrlC {
     pub fn trigger(&self) {
         self.0.fetch_max(1, Ordering::SeqCst);
     }
+    /// Programmatic second press: stop and skip the upload drain.
+    pub fn trigger_again(&self) {
+        self.0.fetch_max(2, Ordering::SeqCst);
+    }
 }
 
 pub fn fmt_bytes(n: u64) -> String {

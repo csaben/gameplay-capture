@@ -190,7 +190,7 @@ wins, and `default_deny` is OR-ed.
 | `gamecap consent [--revoke]` | Show the terms and the accepted version, or revoke |
 | `gamecap paths` | Print all resolved paths |
 
-`record` options: `--no-upload`, `--duration S` (stop by itself), `--drain-secs S`, `--tray`,
+`record` options: `--control-stdin` and `--status-json` (used by `gamecap-gui`; protocol in [cap-gui README](../cap-gui/README.md#recorder-control-protocol-for-other-frontends)), `--no-upload`, `--duration S` (stop by itself), `--drain-secs S`, `--tray`,
 `--fake-encoder`, and for synthetic runs `--synthetic-game-id` (default `synthetic.exe`; the
 blocklist applies), `--synthetic-size WxH`, `--synthetic-fps`, `--synthetic-alt-tab N` (focus goes
 to `--synthetic-foreground` for the last 20% of every N s).
