@@ -1,0 +1,15 @@
+[package]
+name = "cap-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cap-types.workspace = true
+cap-clock.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common"] }

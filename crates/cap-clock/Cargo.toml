@@ -1,0 +1,15 @@
+[package]
+name = "cap-clock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cap-types.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_System_Performance"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

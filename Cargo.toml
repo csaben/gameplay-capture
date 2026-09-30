@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cap-types",
+    "crates/cap-clock",
+    "crates/cap-capture",
+    "crates/cap-encode",
+    "crates/cap-input",
+    "crates/cap-focus",
+    "crates/cap-recorder",
+    "crates/cap-upload",
+    "crates/cap-app",
+    "server/ingest-api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+cap-types = { path = "crates/cap-types" }
+cap-clock = { path = "crates/cap-clock" }
+cap-capture = { path = "crates/cap-capture" }
+cap-encode = { path = "crates/cap-encode" }
+cap-input = { path = "crates/cap-input" }
+cap-focus = { path = "crates/cap-focus" }
+cap-recorder = { path = "crates/cap-recorder" }
+cap-upload = { path = "crates/cap-upload" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+crossbeam-channel = "0.5"
+blake3 = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+object_store = { version = "0.11", features = ["aws"] }
