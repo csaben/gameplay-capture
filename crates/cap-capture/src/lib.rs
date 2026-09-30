@@ -9,6 +9,20 @@ use std::sync::{Arc, Mutex};
 
 pub mod synthetic;
 
+#[cfg(windows)]
+pub mod win_wgc;
+
+#[cfg(target_os = "linux")]
+pub mod linux_x11;
+
+/// XDG ScreenCast portal + PipeWire (Wayland). The portal half is behind the
+/// `portal` feature, the PipeWire stream behind `pipewire`.
+#[cfg(all(target_os = "linux", feature = "portal"))]
+pub mod linux_pipewire;
+
+#[cfg(target_os = "macos")]
+pub mod mac_sck;
+
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
     #[error("window not found: {0}")]
@@ -143,13 +157,176 @@ pub trait FrameSource: Send {
     fn info(&self) -> Option<SourceInfo>;
 }
 
-/// Pick the right backend for this OS / session.
+/// Which backend `default_source()` would pick in this process, without
+/// creating it. Useful for logs and `--help` style diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    WindowsGraphicsCapture,
+    PipeWire,
+    X11,
+    ScreenCaptureKit,
+}
+
+/// Pure selection logic for Linux, split out so it can be unit-tested.
+/// `pipewire_built` is whether the `pipewire` feature is compiled in.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn pick_linux_backend(
+    pipewire_built: bool,
+    wayland_display: Option<&str>,
+    display: Option<&str>,
+) -> Result<BackendKind> {
+    let set = |v: Option<&str>| v.is_some_and(|s| !s.is_empty());
+    if pipewire_built && set(wayland_display) {
+        return Ok(BackendKind::PipeWire);
+    }
+    if set(display) {
+        return Ok(BackendKind::X11);
+    }
+    if set(wayland_display) {
+        return Err(CaptureError::Unsupported(
+            "Wayland session without an X server; rebuild cap-capture with the `pipewire` feature".into(),
+        ));
+    }
+    Err(CaptureError::Unsupported("neither WAYLAND_DISPLAY nor DISPLAY is set".into()))
+}
+
+/// The backend `default_source()` selects for this OS / session.
+pub fn default_backend() -> Result<BackendKind> {
+    #[cfg(windows)]
+    {
+        Ok(BackendKind::WindowsGraphicsCapture)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Ok(BackendKind::ScreenCaptureKit)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let w = std::env::var("WAYLAND_DISPLAY").ok();
+        let d = std::env::var("DISPLAY").ok();
+        pick_linux_backend(cfg!(feature = "pipewire"), w.as_deref(), d.as_deref())
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        Err(CaptureError::Unsupported(std::env::consts::OS.into()))
+    }
+}
+
+/// Pick the right backend for this OS / session:
+/// Windows -> WGC; macOS -> ScreenCaptureKit; Linux -> PipeWire if built with
+/// the `pipewire` feature and `WAYLAND_DISPLAY` is set, else X11 if `DISPLAY`
+/// is set, else `Unsupported`. Backends are created with default config; build
+/// them directly (e.g. `linux_x11::X11Source::new(cfg)`) to customise.
 pub fn default_source() -> Result<Box<dyn FrameSource>> {
-    Err(CaptureError::Unsupported("no backend implemented yet".into()))
+    match default_backend()? {
+        #[cfg(windows)]
+        BackendKind::WindowsGraphicsCapture => Ok(Box::new(win_wgc::WgcSource::new(Default::default()))),
+        #[cfg(target_os = "macos")]
+        BackendKind::ScreenCaptureKit => Ok(Box::new(mac_sck::SckSource::new(Default::default()))),
+        #[cfg(all(target_os = "linux", feature = "pipewire"))]
+        BackendKind::PipeWire => Ok(Box::new(linux_pipewire::PipeWireSource::new(Default::default()))),
+        #[cfg(target_os = "linux")]
+        BackendKind::X11 => Ok(Box::new(linux_x11::X11Source::new(Default::default()))),
+        #[allow(unreachable_patterns)]
+        other => Err(CaptureError::Unsupported(format!("{other:?} not built for this target"))),
+    }
 }
 
 #[cfg(target_os = "macos")]
 pub mod macos {
+    use std::ffi::c_void;
+
+    #[link(name = "CoreVideo", kind = "framework")]
+    extern "C" {
+        fn CVPixelBufferRetain(buffer: *mut c_void) -> *mut c_void;
+        fn CVPixelBufferRelease(buffer: *mut c_void);
+        fn CVPixelBufferGetWidth(buffer: *mut c_void) -> usize;
+        fn CVPixelBufferGetHeight(buffer: *mut c_void) -> usize;
+        fn CVPixelBufferGetPixelFormatType(buffer: *mut c_void) -> u32;
+    }
+
     /// Retained `CVPixelBufferRef`; released on drop.
-    pub struct RetainedPixelBuffer(pub *mut std::ffi::c_void);
+    ///
+    /// The field is the raw `CVPixelBufferRef`. Whoever constructs this with
+    /// the tuple constructor transfers one +1 reference to it.
+    pub struct RetainedPixelBuffer(pub *mut c_void);
+
+    impl RetainedPixelBuffer {
+        /// Take an extra reference on `buffer` (which the caller keeps owning).
+        ///
+        /// # Safety
+        /// `buffer` must be a valid, non-null `CVPixelBufferRef`.
+        pub unsafe fn retain(buffer: *mut c_void) -> Self {
+            Self(CVPixelBufferRetain(buffer))
+        }
+        /// The raw `CVPixelBufferRef` (borrowed; still owned by `self`).
+        pub fn as_ptr(&self) -> *mut c_void {
+            self.0
+        }
+        pub fn width(&self) -> usize {
+            // SAFETY: self.0 is a live retained CVPixelBufferRef.
+            unsafe { CVPixelBufferGetWidth(self.0) }
+        }
+        pub fn height(&self) -> usize {
+            // SAFETY: as above.
+            unsafe { CVPixelBufferGetHeight(self.0) }
+        }
+        /// CoreVideo FourCC, e.g. `'BGRA'` or `'420v'`.
+        pub fn pixel_format(&self) -> u32 {
+            // SAFETY: as above.
+            unsafe { CVPixelBufferGetPixelFormatType(self.0) }
+        }
+    }
+
+    impl Clone for RetainedPixelBuffer {
+        fn clone(&self) -> Self {
+            // SAFETY: self.0 is live; retain returns the same pointer +1.
+            unsafe { Self::retain(self.0) }
+        }
+    }
+
+    impl Drop for RetainedPixelBuffer {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: we own exactly one reference.
+                unsafe { CVPixelBufferRelease(self.0) };
+            }
+        }
+    }
+
+    // SAFETY: CVPixelBuffer retain/release are thread-safe.
+    unsafe impl Send for RetainedPixelBuffer {}
+    unsafe impl Sync for RetainedPixelBuffer {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linux_backend_selection() {
+        use BackendKind::*;
+        assert_eq!(pick_linux_backend(true, Some("wayland-0"), Some(":0")).unwrap(), PipeWire);
+        assert_eq!(pick_linux_backend(false, Some("wayland-0"), Some(":0")).unwrap(), X11);
+        assert_eq!(pick_linux_backend(true, None, Some(":0")).unwrap(), X11);
+        assert_eq!(pick_linux_backend(true, Some(""), Some(":1")).unwrap(), X11);
+        assert!(matches!(pick_linux_backend(false, Some("wayland-0"), None), Err(CaptureError::Unsupported(_))));
+        assert!(matches!(pick_linux_backend(true, None, None), Err(CaptureError::Unsupported(_))));
+    }
+
+    #[test]
+    fn latest_frame_sequence() {
+        let l = LatestFrame::new();
+        assert_eq!(l.latest().0, 0);
+        l.publish(CapturedFrame {
+            capture_ns: 5,
+            width: 1,
+            height: 1,
+            format: PixelFormat::Bgra8,
+            payload: FramePayload::Cpu { data: vec![0; 4], stride: 4 },
+        });
+        let (seq, f) = l.latest();
+        assert_eq!(seq, 1);
+        assert_eq!(f.unwrap().capture_ns, 5);
+    }
 }

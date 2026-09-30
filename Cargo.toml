@@ -40,3 +40,5 @@ toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 object_store = { version = "0.11", features = ["aws"] }
+arrow = { version = "60", default-features = false }
+parquet = { version = "60", default-features = false, features = ["arrow", "snap"] }

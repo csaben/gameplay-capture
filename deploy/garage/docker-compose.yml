@@ -1,0 +1,18 @@
+# Garage (S3-compatible object store) for Phase 1: one node on the Ubuntu box,
+# S3 API published on the Tailscale IP only. Use ./setup.sh, not `docker compose up`
+# directly: it renders the config and the env file this compose file reads.
+services:
+  garage:
+    image: dxflrs/garage:v2.4.1
+    restart: unless-stopped
+    # Run as the invoking user so state dirs stay removable without sudo.
+    user: "${GARAGE_UID:?run ./setup.sh}:${GARAGE_GID:?run ./setup.sh}"
+    ports:
+      # S3 API only. RPC (3901) and admin (3903) stay inside the container network.
+      - "${GARAGE_BIND_ADDR:?run ./setup.sh}:${GARAGE_S3_PORT:-3900}:3900"
+    volumes:
+      - "${GARAGE_STATE_DIR:?run ./setup.sh}/garage.toml:/etc/garage.toml:ro"
+      - "${GARAGE_STATE_DIR}/meta:/var/lib/garage/meta"
+      - "${GARAGE_DATA_DIR:?run ./setup.sh}:/var/lib/garage/data"
+    environment:
+      RUST_LOG: "garage=info"

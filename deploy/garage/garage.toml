@@ -1,0 +1,26 @@
+# Template: ./setup.sh renders this into $GARAGE_STATE_DIR/garage.toml with
+# fresh secrets. Do not put real secrets in this file.
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "lmdb"
+metadata_auto_snapshot_interval = "6h"
+
+# Single node, single copy. Back up the data dir (or add nodes) if the raw
+# segments matter beyond the shards built from them.
+replication_factor = 1
+# Segments are HEVC + parquet: already compressed.
+compression_level = "none"
+
+rpc_bind_addr = "0.0.0.0:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret = "__RPC_SECRET__"
+
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "0.0.0.0:3900"
+root_domain = ".s3.garage.localhost"
+
+[admin]
+api_bind_addr = "0.0.0.0:3903"
+admin_token = "__ADMIN_TOKEN__"
+metrics_token = "__METRICS_TOKEN__"

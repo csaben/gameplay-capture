@@ -5,9 +5,33 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["gamepad"]
+# Gamepads via gilrs. On Linux this links libudev (needs `libudev-dev` to build).
+gamepad = ["dep:gilrs"]
+
 [dependencies]
 cap-types.workspace = true
 cap-clock.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 crossbeam-channel.workspace = true
+gilrs = { version = "0.11", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_Graphics_Gdi",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-foundation-sys = "0.8"

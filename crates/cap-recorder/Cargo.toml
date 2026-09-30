@@ -10,8 +10,18 @@ cap-types.workspace = true
 cap-clock.workspace = true
 cap-capture.workspace = true
 cap-encode.workspace = true
-cap-input.workspace = true
+# Only the trait is needed; skip the gilrs/libudev default feature.
+cap-input = { path = "../cap-input", default-features = false }
 cap-focus.workspace = true
 crossbeam-channel.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
+arrow.workspace = true
+parquet.workspace = true
+
+
+[dev-dependencies]
+

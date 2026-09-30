@@ -5,11 +5,60 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# XDG ScreenCast portal (ashpd) only: session negotiation + restore token.
+# Pure Rust (zbus), builds without system packages.
+portal = ["dep:ashpd", "dep:futures-executor"]
+# Full Wayland capture: portal + PipeWire stream. Needs libpipewire-0.3-dev,
+# libspa-0.2-dev and libclang at build time.
+pipewire = ["portal", "dep:pipewire"]
+
 [dependencies]
 cap-types.workspace = true
 cap-clock.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["composite", "shm"] }
+libc = "0.2"
+ashpd = { version = "0.13", default-features = false, features = ["screencast", "async-io"], optional = true }
+futures-executor = { version = "0.3", optional = true }
+pipewire = { version = "0.9", features = ["v0_3_33"], optional = true }
+
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common"] }
+windows = { version = "0.58", features = [
+    "Foundation",
+    "Graphics",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Security_Authorization_AppCapabilityAccess",
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# objc2 framework crates enable every module by default; we only add the
+# cross-framework interop features.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = "0.3"
+objc2-screen-capture-kit = { version = "0.3", features = ["block2", "dispatch2", "objc2-core-media", "objc2-core-graphics", "objc2-core-foundation"] }
+objc2-core-media = { version = "0.3", features = ["objc2-core-video"] }
+objc2-core-video = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+dispatch2 = "0.3"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+x11rb = "0.13"

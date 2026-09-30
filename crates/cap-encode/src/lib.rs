@@ -2,6 +2,20 @@
 //!
 //! The encoder runs continuously across segments; the recorder forces a
 //! keyframe at each segment boundary and opens a new `SegmentMuxer`.
+//!
+//! Hardware encoders are configured for zero output delay (NVENC `delay=0`,
+//! `zerolatency`), so `encode` normally returns the packet for the frame it
+//! was given. Callers should still route packets to segments by `pkt.pts`
+//! (not by call order); `SegmentMuxer::write` rejects packets that precede
+//! its `pts_offset`.
+//!
+//! All FFmpeg / D3D11 / VideoToolbox FFI lives in the private `ffi` module.
+//! See `README.md` in this crate for platform status and build notes.
+
+mod ffi;
+mod gpu;
+mod pipeline;
+pub mod probe;
 
 use cap_capture::CapturedFrame;
 use cap_types::Nanos;
@@ -72,56 +86,118 @@ pub struct StreamParams {
 }
 
 pub struct Encoder {
-    _private: (),
+    inner: pipeline::Inner,
 }
 
 impl Encoder {
     /// Probe hardware encoders in platform order and open the first that works.
     /// Refuses (never falls back to software) unless `EncoderConfig::force_encoder`
     /// names a software encoder explicitly.
-    pub fn open(_cfg: &EncoderConfig) -> Result<Self> {
-        unimplemented!()
+    pub fn open(cfg: &EncoderConfig) -> Result<Self> {
+        Ok(Self { inner: pipeline::open(cfg, None)? })
     }
+
+    /// Windows: open on the capture session's D3D11 device (preferred over
+    /// `open`, which creates its own device and reopens on the first frame
+    /// that comes from a different device).
+    #[cfg(windows)]
+    pub fn open_with_d3d11_device(
+        cfg: &EncoderConfig,
+        device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    ) -> Result<Self> {
+        Ok(Self { inner: pipeline::open(cfg, Some(pipeline::PlatformDevice::D3D11(device.clone())))? })
+    }
+
     pub fn params(&self) -> &StreamParams {
-        unimplemented!()
+        &self.inner.params
     }
+
+    /// Which scale/convert path the last frame took (e.g.
+    /// `"gpu:hwupload+scale_cuda"`, `"cpu:swscale+hwupload"`). For logs/tests.
+    pub fn last_frame_path(&self) -> Option<&'static str> {
+        self.inner.last_path.map(|p| p.as_str())
+    }
+
     /// Scale/convert and encode one frame. `pts` is the output frame index.
     /// Returns zero or more packets (no B-frames, so normally exactly one).
-    pub fn encode(&mut self, _frame: &CapturedFrame, _pts: i64, _force_keyframe: bool) -> Result<Vec<EncodedPacket>> {
-        unimplemented!()
+    pub fn encode(&mut self, frame: &CapturedFrame, pts: i64, force_keyframe: bool) -> Result<Vec<EncodedPacket>> {
+        self.inner.encode(frame, pts, force_keyframe)
     }
+
+    /// Drain the encoder. Encoding may continue afterwards (the encoder is
+    /// transparently reopened with identical settings).
     pub fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
-        unimplemented!()
+        self.inner.flush()
     }
 }
 
 /// Writes one segment's `video.mp4` as fragmented MP4
 /// (`movflags=frag_keyframe+empty_moov`) so a crash leaves a playable file.
 pub struct SegmentMuxer {
-    _private: (),
+    w: ffi::Mp4Writer,
+    pts_offset: i64,
+    last_dts: Option<i64>,
+    frames: u64,
 }
+
+/// movflags used for every segment.
+pub const MOVFLAGS: &str = "frag_keyframe+empty_moov+default_base_moof";
 
 impl SegmentMuxer {
     /// `pts_offset` is subtracted from packet timestamps so each file starts at 0.
-    pub fn create(_path: &Path, _params: &StreamParams, _pts_offset: i64) -> Result<Self> {
-        unimplemented!()
+    pub fn create(path: &Path, params: &StreamParams, pts_offset: i64) -> Result<Self> {
+        ffi::init();
+        let codec = match params.codec {
+            Codec::Hevc => ffi::MuxCodec::Hevc,
+            Codec::Av1 => ffi::MuxCodec::Av1,
+        };
+        let w = ffi::Mp4Writer::create(path, codec, params.width, params.height, params.rate_hz, &params.extradata, MOVFLAGS)?;
+        Ok(Self { w, pts_offset, last_dts: None, frames: 0 })
     }
-    pub fn write(&mut self, _pkt: &EncodedPacket) -> Result<()> {
-        unimplemented!()
+
+    pub fn write(&mut self, pkt: &EncodedPacket) -> Result<()> {
+        let pts = pkt.pts - self.pts_offset;
+        let dts = pkt.dts - self.pts_offset;
+        if pts < 0 || dts < 0 {
+            return Err(EncodeError::Ffmpeg(format!(
+                "packet pts {} / dts {} precedes segment start {}",
+                pkt.pts, pkt.dts, self.pts_offset
+            )));
+        }
+        if self.frames == 0 && !pkt.keyframe {
+            tracing::warn!(pts = pkt.pts, "segment does not start with a keyframe");
+        }
+        if let Some(l) = self.last_dts {
+            if dts <= l {
+                return Err(EncodeError::Ffmpeg(format!("non-increasing dts {dts} after {l}")));
+            }
+        }
+        self.w.write(&pkt.data, pts, dts, pkt.keyframe, 1)?;
+        self.last_dts = Some(dts);
+        self.frames += 1;
+        Ok(())
     }
-    pub fn finish(self) -> Result<()> {
-        unimplemented!()
+
+    /// Packets written so far.
+    pub fn frames_written(&self) -> u64 {
+        self.frames
+    }
+
+    pub fn finish(mut self) -> Result<()> {
+        self.w.finish()
     }
 }
 
 /// GPU name for the manifest (best effort).
 pub fn gpu_name() -> String {
-    "unknown".into()
+    gpu::gpu_name()
 }
 
 #[allow(dead_code)]
 fn _assert_send() {
     fn s<T: Send>() {}
     let _ = s::<EncodedPacket>;
+    let _ = s::<Encoder>;
+    let _ = s::<SegmentMuxer>;
     let _: Nanos = 0;
 }

@@ -10,3 +10,12 @@ cap-types.workspace = true
 cap-capture.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Raw FFI only: the hw-frame / filter-graph / DRM APIs this crate needs are
+# not wrapped by ffmpeg-next, so it uses ffmpeg-next's sys crate directly.
+# 7.1 builds against system FFmpeg 6.1 (dev box) and 7.x (production).
+ffmpeg-sys-next = { version = "7.1", default-features = false, features = ["avcodec", "avformat", "avfilter", "swscale"] }
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
+

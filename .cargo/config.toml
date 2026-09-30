@@ -1,0 +1,4 @@
+[env]
+# libclang-18 on the Ubuntu box lacks its builtin headers (limits.h); point
+# bindgen at gcc's. Harmless elsewhere. Install libclang-common-18-dev to drop it.
+BINDGEN_EXTRA_CLANG_ARGS = "-I/usr/lib/gcc/x86_64-linux-gnu/13/include"
