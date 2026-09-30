@@ -4,7 +4,8 @@
 //! time-ordered equivalent; the recorder needs a streaming gate that also
 //! handles pause.)
 
-use cap_types::{InputEvent, Nanos};
+use cap_types::{Device, EventKind, InputEvent, Nanos};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Held-key tracker shared with `cap-focus` (drops duplicate presses and
 /// releases of things never seen pressed; `release_all` synthesises releases).
@@ -33,6 +34,11 @@ impl InputGate {
     /// Starts closed (unfocused, not paused) until the focus tracker reports.
     pub fn new() -> Self {
         Self { focused: false, paused: false, open_since: Nanos::MAX, held: HeldState::default(), dropped_gated: 0 }
+    }
+
+    /// Whether the target game currently has focus (ignores pause).
+    pub fn is_focused(&self) -> bool {
+        self.focused
     }
 
     pub fn is_open(&self) -> bool {
@@ -78,6 +84,72 @@ impl InputGate {
     }
 }
 
+/// Input state carried across a segment boundary.
+///
+/// Each segment is processed on its own downstream, so a key held across a
+/// boundary would look released in the next segment until its `key_up`. The
+/// writer feeds every logged event of a segment (in time order) into this
+/// tracker and prepends [`CarriedInputs::still_held`] to the next segment's
+/// `inputs.parquet`: a `key_down` / `mouse_button` 1 / `button` (last value) /
+/// `axis` (last value) row at that segment's `t_start_ns` for everything still
+/// held or deflected (see `pipeline/SCHEMA.md`). A pause or focus loss always
+/// logs releases first, so nothing is carried across those.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CarriedInputs {
+    keys: BTreeSet<u32>,
+    mouse_buttons: BTreeSet<u32>,
+    pad_buttons: BTreeMap<u32, f32>,
+    pad_axes: BTreeMap<u32, f32>,
+}
+
+impl CarriedInputs {
+    pub fn observe(&mut self, ev: &InputEvent) {
+        match ev.kind {
+            EventKind::KeyDown => {
+                self.keys.insert(ev.code);
+            }
+            EventKind::KeyUp => {
+                self.keys.remove(&ev.code);
+            }
+            EventKind::MouseButton if ev.value != 0.0 => {
+                self.mouse_buttons.insert(ev.code);
+            }
+            EventKind::MouseButton => {
+                self.mouse_buttons.remove(&ev.code);
+            }
+            EventKind::Button if ev.value != 0.0 => {
+                self.pad_buttons.insert(ev.code, ev.value);
+            }
+            EventKind::Button => {
+                self.pad_buttons.remove(&ev.code);
+            }
+            EventKind::Axis if ev.value != 0.0 => {
+                self.pad_axes.insert(ev.code, ev.value);
+            }
+            EventKind::Axis => {
+                self.pad_axes.remove(&ev.code);
+            }
+            EventKind::MouseMove | EventKind::Wheel => {}
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.mouse_buttons.is_empty() && self.pad_buttons.is_empty() && self.pad_axes.is_empty()
+    }
+
+    /// "Still held" rows stamped `t_ns`: keys, mouse buttons, pad buttons,
+    /// pad axes, each ordered by code.
+    pub fn still_held(&self, t_ns: Nanos) -> Vec<InputEvent> {
+        let ev = |device, kind, code, value| InputEvent { t_ns, device, kind, code, value };
+        let mut out = Vec::new();
+        out.extend(self.keys.iter().map(|&c| ev(Device::Keyboard, EventKind::KeyDown, c, 1.0)));
+        out.extend(self.mouse_buttons.iter().map(|&c| ev(Device::Mouse, EventKind::MouseButton, c, 1.0)));
+        out.extend(self.pad_buttons.iter().map(|(&c, &v)| ev(Device::Gamepad, EventKind::Button, c, v)));
+        out.extend(self.pad_axes.iter().map(|(&c, &v)| ev(Device::Gamepad, EventKind::Axis, c, v)));
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +188,38 @@ mod tests {
         assert_eq!(rel.len(), 1);
         assert!(g.set_focused(false, 45).is_empty(), "already closed");
         assert!(!g.admit(&ev(46, Device::Keyboard, EventKind::KeyDown, 30, 1.0)));
+    }
+
+    #[test]
+    fn carried_inputs() {
+        let mut c = CarriedInputs::default();
+        for e in [
+            ev(1, Device::Keyboard, EventKind::KeyDown, 30, 1.0),
+            ev(2, Device::Keyboard, EventKind::KeyDown, 31, 1.0),
+            ev(3, Device::Keyboard, EventKind::KeyUp, 31, 0.0),
+            ev(4, Device::Mouse, EventKind::MouseButton, 1, 1.0),
+            ev(5, Device::Mouse, EventKind::MouseMove, 0, 5.0),
+            ev(6, Device::Gamepad, EventKind::Button, 7, 0.4),
+            ev(7, Device::Gamepad, EventKind::Axis, 0, 0.25),
+            ev(8, Device::Gamepad, EventKind::Axis, 1, 0.5),
+            ev(9, Device::Gamepad, EventKind::Axis, 1, 0.0),
+        ] {
+            c.observe(&e);
+        }
+        let held = c.still_held(100);
+        let rows: Vec<_> = held.iter().map(|e| (e.t_ns, e.kind, e.code, e.value)).collect();
+        assert_eq!(
+            rows,
+            vec![
+                (100, EventKind::KeyDown, 30, 1.0),
+                (100, EventKind::MouseButton, 1, 1.0),
+                (100, EventKind::Button, 7, 0.4),
+                (100, EventKind::Axis, 0, 0.25),
+            ]
+        );
+        for e in held.iter().map(|e| InputEvent { value: 0.0, kind: if e.kind == EventKind::KeyDown { EventKind::KeyUp } else { e.kind }, ..*e }) {
+            c.observe(&e);
+        }
+        assert!(c.is_empty());
     }
 }

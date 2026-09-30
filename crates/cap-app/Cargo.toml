@@ -4,10 +4,69 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "gamecap: gameplay frame + action recorder (CLI, optional tray)"
 
 [[bin]]
 name = "gamecap"
 path = "src/main.rs"
 
+[features]
+default = ["gamepad", "calibrate"]
+# Gamepads via gilrs (cap-input's `gamepad` feature). On Linux gilrs links
+# libudev, so building needs `libudev-dev`; on a box without it build with
+# `--no-default-features --features calibrate` (or plain --no-default-features).
+gamepad = ["cap-input/gamepad"]
+# `gamecap calibrate`: a winit + softbuffer test window. Pure Rust on all
+# platforms (X11/Wayland libraries are loaded at runtime).
+calibrate = ["dep:winit", "dep:softbuffer"]
+# Tray icon (recording indicator, Pause/Resume/Quit). Windows and macOS only:
+# on Linux tray-icon needs GTK 3 + libappindicator dev packages, so the
+# feature is accepted but compiles to nothing there.
+tray = ["dep:tray-icon", "dep:winit"]
+# Wayland capture through the XDG portal + PipeWire (needs libpipewire-0.3-dev,
+# libspa-0.2-dev, libclang). Persists the portal restore token in the state file.
+pipewire = ["cap-capture/pipewire"]
+
 [dependencies]
+cap-types.workspace = true
+cap-clock.workspace = true
+cap-capture.workspace = true
+cap-encode.workspace = true
+cap-input = { path = "../cap-input", default-features = false }
+cap-focus.workspace = true
 cap-recorder.workspace = true
+cap-upload.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender = "0.2"
+toml.workspace = true
+toml_edit = "0.22"
+clap = { workspace = true, features = ["env"] }
+tokio.workspace = true
+object_store.workspace = true
+crossbeam-channel.workspace = true
+dirs = "6"
+humantime = "2"
+ctrlc = { version = "3", features = ["termination"] }
+rand = "0.8"
+winit = { version = "0.30", optional = true }
+softbuffer = { version = "0.4", optional = true }
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+tray-icon = { version = "0.24", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

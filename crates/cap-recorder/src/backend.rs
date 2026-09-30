@@ -33,6 +33,15 @@ pub trait SinkFactory: Send {
 
 /// `cap_encode::Encoder`, re-opened lazily after a flush (FFmpeg encoders can't
 /// continue after being drained).
+///
+/// Windows: WGC frames live on the capture session's D3D11 device, and the
+/// encoder must run on that same device. So on Windows [`FfmpegEncoder::open`]
+/// only *probes* (opens and drops an encoder, so "no hardware encoder" still
+/// fails up front) and the real encoder is opened on the first frame with
+/// `Encoder::open_with_d3d11_device(frame's device)` when the payload is D3D11
+/// (plain `Encoder::open` otherwise). Other platforms open eagerly.
+/// Re-opens (after a flush) are pinned to the probed encoder name and follow
+/// the same rule.
 pub struct FfmpegEncoder {
     cfg: EncoderConfig,
     inner: Option<Encoder>,
@@ -42,9 +51,27 @@ pub struct FfmpegEncoder {
 impl FfmpegEncoder {
     /// Probes and opens the hardware encoder now, so failures surface before recording.
     pub fn open(cfg: &EncoderConfig) -> EncResult<Self> {
-        let inner = Encoder::open(cfg)?;
-        let params = inner.params().clone();
-        Ok(Self { cfg: cfg.clone(), inner: Some(inner), params })
+        let probe = Encoder::open(cfg)?;
+        let params = probe.params().clone();
+        // Pin later (re-)opens to the encoder the probe picked.
+        let mut cfg = cfg.clone();
+        cfg.force_encoder = Some(params.encoder_name.clone());
+        let inner = if cfg!(windows) {
+            drop(probe); // reopened on the first frame's D3D11 device
+            None
+        } else {
+            Some(probe)
+        };
+        Ok(Self { cfg, inner, params })
+    }
+
+    fn open_for(&self, frame: &CapturedFrame) -> EncResult<Encoder> {
+        #[cfg(windows)]
+        if let cap_capture::FramePayload::D3D11 { device, .. } = &frame.payload {
+            return Encoder::open_with_d3d11_device(&self.cfg, device);
+        }
+        let _ = frame;
+        Encoder::open(&self.cfg)
     }
 }
 
@@ -54,10 +81,12 @@ impl FrameEncoder for FfmpegEncoder {
     }
     fn encode(&mut self, frame: &CapturedFrame, pts: i64, force_keyframe: bool) -> EncResult<Vec<EncodedPacket>> {
         if self.inner.is_none() {
-            let mut cfg = self.cfg.clone();
-            // Pin the re-opened encoder to the one we probed first.
-            cfg.force_encoder = Some(self.params.encoder_name.clone());
-            self.inner = Some(Encoder::open(&cfg)?);
+            let enc = self.open_for(frame)?;
+            if enc.params().extradata != self.params.extradata {
+                tracing::debug!("re-opened encoder has different extradata; using the new parameters");
+            }
+            self.params = enc.params().clone();
+            self.inner = Some(enc);
         }
         self.inner.as_mut().unwrap().encode(frame, pts, force_keyframe)
     }

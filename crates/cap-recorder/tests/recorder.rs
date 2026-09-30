@@ -39,6 +39,7 @@ fn start(cfg: RecorderConfig, src_fps: u32, inputs: Vec<ScriptedEvent>, focus: S
         frames: Box::new(SyntheticSource::new(64, 36, src_fps)),
         inputs: vec![Box::new(ScriptedInputSource::new(inputs))],
         focus: Box::new(focus),
+        observer: None,
     };
     let rec = Recorder::start_with_backend(
         cfg,
@@ -322,6 +323,7 @@ fn crash_child() {
         frames: Box::new(SyntheticSource::new(64, 36, 30)),
         inputs: vec![Box::new(inputs)],
         focus: Box::new(ScriptedFocusTracker::focused()),
+        observer: None,
     };
     let _rec =
         Recorder::start_with_backend(cfg, sources, Box::new(fake_enc()), Box::new(FakeSinkFactory), Box::new(|_| {})).unwrap();
@@ -403,5 +405,116 @@ fn recover_partials_publishes_or_quarantines() {
     assert_eq!(rep.broken.len(), 1);
     assert!(sess.join("seg_000002.broken").is_dir());
     assert!(sess.join("seg_000000").is_dir());
+    std::fs::remove_dir_all(&r).unwrap();
+}
+
+/// The `Sources::observer` tap sees raw inputs (also while paused) and focus
+/// records, and can drive the pause flag (chat-pause style hotkey).
+#[test]
+fn observer_sees_raw_inputs_and_can_pause() {
+    use cap_recorder::Observed;
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::sync::{Arc, Mutex};
+    const CHAT: u32 = 0x1C; // Enter
+    let r = root("observer");
+    let cfg = config(&r, 20, 60);
+    let paused = cfg.paused.clone();
+    let script = vec![
+        ScriptedEvent::new(300, Device::Keyboard, EventKind::KeyDown, 30, 1.0),
+        ScriptedEvent::new(350, Device::Keyboard, EventKind::KeyUp, 30, 0.0),
+        ScriptedEvent::new(500, Device::Keyboard, EventKind::KeyDown, CHAT, 1.0), // opens chat -> pause
+        ScriptedEvent::new(550, Device::Keyboard, EventKind::KeyUp, CHAT, 0.0),
+        ScriptedEvent::new(700, Device::Keyboard, EventKind::KeyDown, 0x23, 1.0), // typed in chat: not logged
+        ScriptedEvent::new(750, Device::Keyboard, EventKind::KeyUp, 0x23, 0.0),
+        ScriptedEvent::new(900, Device::Keyboard, EventKind::KeyDown, CHAT, 1.0), // closes chat -> resume
+        ScriptedEvent::new(950, Device::Keyboard, EventKind::KeyUp, CHAT, 0.0),
+        ScriptedEvent::new(1400, Device::Keyboard, EventKind::KeyDown, 31, 1.0),
+        ScriptedEvent::new(1450, Device::Keyboard, EventKind::KeyUp, 31, 0.0),
+    ];
+    let seen: Arc<Mutex<Vec<(u32, bool)>>> = Arc::default();
+    let focus_seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let (seen2, focus2, paused2) = (seen.clone(), focus_seen.clone(), paused.clone());
+    let observer: cap_recorder::Observer = Box::new(move |o| match o {
+        Observed::Input { event, focused } => {
+            if event.kind == EventKind::KeyDown {
+                seen2.lock().unwrap().push((event.code, focused));
+                if event.code == CHAT && focused {
+                    paused2.fetch_xor(true, SeqCst);
+                }
+            }
+        }
+        Observed::Focus(rec) => focus2.lock().unwrap().push(rec.focused),
+    });
+    let (tx, done) = unbounded();
+    let sources = Sources::new(
+        Box::new(SyntheticSource::new(64, 36, 30)),
+        vec![Box::new(ScriptedInputSource::new(script))],
+        Box::new(ScriptedFocusTracker::focused()),
+    )
+    .with_observer(observer);
+    let rec = Recorder::start_with_backend(cfg, sources, Box::new(fake_enc()), Box::new(FakeSinkFactory), Box::new(move |p| tx.send(p).unwrap()))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(1900));
+    let (stats, segs) = stop(Run { rec, done });
+    assert_eq!(*seen.lock().unwrap(), vec![(30, true), (CHAT, true), (0x23, true), (CHAT, true), (31, true)]);
+    assert_eq!(*focus_seen.lock().unwrap(), vec![true]);
+    assert_eq!(segs.len(), 2, "chat pause creates a boundary: {stats:?}");
+    let logged: Vec<u32> = segs.iter().flat_map(|s| s.inputs.iter()).filter(|e| e.kind == EventKind::KeyDown).map(|e| e.code).collect();
+    assert_eq!(logged, vec![30, CHAT, 31], "text typed while chat-paused is not logged");
+    for s in &segs {
+        assert_no_stuck_keys(s);
+    }
+    std::fs::remove_dir_all(&r).unwrap();
+}
+
+/// Keys / buttons / axes held across a segment boundary are re-emitted at the
+/// next segment's `t_start_ns` (pipeline/SCHEMA.md), so every segment is
+/// self-contained.
+#[test]
+fn held_inputs_carried_into_next_segment() {
+    let r = root("carry");
+    let cfg = config(&r, 20, 1);
+    let script = vec![
+        ScriptedEvent::new(300, Device::Keyboard, EventKind::KeyDown, 30, 1.0), // held ~2.3 s
+        ScriptedEvent::new(400, Device::Mouse, EventKind::MouseButton, 1, 1.0), // held into seg 1
+        ScriptedEvent::new(500, Device::Gamepad, EventKind::Axis, 0, 0.5),      // deflected until stop
+        ScriptedEvent::new(600, Device::Gamepad, EventKind::Button, 7, 0.25),   // analog trigger
+        ScriptedEvent::new(1500, Device::Mouse, EventKind::MouseButton, 1, 0.0),
+        ScriptedEvent::new(1600, Device::Gamepad, EventKind::Button, 7, 0.0),
+        ScriptedEvent::new(2600, Device::Keyboard, EventKind::KeyUp, 30, 0.0),
+    ];
+    let run = start(cfg, 30, script, ScriptedFocusTracker::focused(), fake_enc());
+    std::thread::sleep(Duration::from_millis(3400));
+    let (_stats, segs) = stop(run);
+    assert!(segs.len() >= 4, "{}", segs.len());
+    let rows = |s: &Seg| s.inputs.iter().map(|e| (e.t_ns - s.m.t_start_ns, e.kind, e.code, e.value)).collect::<Vec<_>>();
+    // seg 0: the real presses (the first tick comes ~50-100 ms after start).
+    let r0 = rows(&segs[0]);
+    assert_eq!(r0.iter().map(|r| (r.1, r.2)).collect::<Vec<_>>(), vec![
+        (EventKind::KeyDown, 30), (EventKind::MouseButton, 1), (EventKind::Axis, 0), (EventKind::Button, 7)
+    ]);
+    // seg 1 starts with all four "still held" rows at exactly t_start, then the two releases.
+    let r1 = rows(&segs[1]);
+    assert_eq!(&r1[..4], &[
+        (0, EventKind::KeyDown, 30, 1.0),
+        (0, EventKind::MouseButton, 1, 1.0),
+        (0, EventKind::Button, 7, 0.25),
+        (0, EventKind::Axis, 0, 0.5),
+    ]);
+    assert_eq!(r1[4..].iter().map(|r| (r.1, r.2, r.3)).collect::<Vec<_>>(), vec![
+        (EventKind::MouseButton, 1, 0.0), (EventKind::Button, 7, 0.0)
+    ]);
+    assert!(r1[4..].iter().all(|r| r.0 > 0));
+    // seg 2: key + axis still held; key released inside it.
+    let r2 = rows(&segs[2]);
+    assert_eq!(r2.iter().map(|r| (r.0 == 0, r.1, r.2)).collect::<Vec<_>>(), vec![
+        (true, EventKind::KeyDown, 30), (true, EventKind::Axis, 0), (false, EventKind::KeyUp, 30)
+    ]);
+    // seg 3: only the stick is still deflected.
+    let r3 = rows(&segs[3]);
+    assert_eq!(r3.first().map(|r| (r.0, r.1, r.2, r.3)), Some((0, EventKind::Axis, 0, 0.5)));
+    for s in &segs {
+        check_segment(s, 50_000_000);
+    }
     std::fs::remove_dir_all(&r).unwrap();
 }

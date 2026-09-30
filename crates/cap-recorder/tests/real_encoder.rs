@@ -46,6 +46,7 @@ fn synthetic_to_nvenc_segments() {
         frames: Box::new(SyntheticSource::new(1280, 720, 60)),
         inputs: vec![],
         focus: Box::new(ScriptedFocusTracker::focused()),
+        observer: None,
     };
     let rec = Recorder::start(cfg, sources, Box::new(move |p| tx.send(p).unwrap())).expect("open hevc_nvenc");
     std::thread::sleep(Duration::from_millis(5200));
@@ -95,6 +96,7 @@ fn nvenc_crash_child() {
         frames: Box::new(SyntheticSource::new(640, 360, 30)),
         inputs: vec![],
         focus: Box::new(ScriptedFocusTracker::focused()),
+        observer: None,
     };
     let _rec = Recorder::start(cfg, sources, Box::new(|_| {})).unwrap();
     std::thread::sleep(Duration::from_secs(60));

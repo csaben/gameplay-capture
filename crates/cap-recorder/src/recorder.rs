@@ -33,6 +33,11 @@
 //!   frames it actually encoded, so `frame_idx` is continuous from 0 in each
 //!   segment and equals the frame's position in `video.mp4`. The first frame of
 //!   every segment is a forced keyframe.
+//! - Held state carries across segment boundaries: `inputs.parquet` of every
+//!   segment after the first starts with "still held" rows at `t_start_ns`
+//!   (`key_down`, `mouse_button` 1, `button`/`axis` with their last value) for
+//!   everything held at the end of the previous segment ([`CarriedInputs`]).
+//!   Not applied to segments rebuilt by `recover_partials` after a crash.
 //! - Each tick uses the newest source frame captured at or before the tick
 //!   (`capture_ns <= tick_ns`, non-decreasing).
 //! - `repeated` = this frame's source frame is the same as the previous frame
@@ -47,7 +52,7 @@
 
 use crate::backend::{FfmpegEncoder, FfmpegSinkFactory, FrameEncoder, SegmentSink, SinkFactory};
 use crate::finalize::{finalize_segment, os_string, SegmentTables};
-use crate::gate::InputGate;
+use crate::gate::{CarriedInputs, InputGate};
 use crate::journal::{Entry, JournalWriter, JOURNAL_FILE};
 use cap_capture::{CapturedFrame, FrameSource, LatestFrame, WindowTarget};
 use cap_encode::{EncodedPacket, EncoderConfig, StreamParams};
@@ -130,11 +135,43 @@ impl RecorderConfig {
     }
 }
 
+/// What an [`Observer`] is shown.
+#[derive(Debug, Clone, Copy)]
+pub enum Observed<'a> {
+    /// A raw input event, *before* focus/pause gating (so hotkeys are seen even
+    /// while paused). `focused` is the gate's current view of whether the
+    /// target game has focus.
+    Input { event: &'a InputEvent, focused: bool },
+    /// A focus change from the tracker (`game_id` = foreground identity).
+    Focus(&'a FocusRecord),
+}
+
+/// Optional tap on the recorder's input/focus streams, for app-level hotkeys
+/// (chat pause, one-key pause) and policy (pause while a blocked game is in
+/// front) without a second set of OS input hooks.
+///
+/// Runs inline on the input-gate thread for every event: it must be cheap and
+/// must never block (setting an atomic such as `RecorderConfig::paused` is the
+/// intended use). A pause requested from here takes effect for the next event.
+pub type Observer = Box<dyn FnMut(Observed<'_>) + Send>;
+
 /// The platform pieces a recorder drives.
 pub struct Sources {
     pub frames: Box<dyn FrameSource>,
     pub inputs: Vec<Box<dyn InputSource>>,
     pub focus: Box<dyn FocusTracker>,
+    /// See [`Observer`]. `None` for no tap.
+    pub observer: Option<Observer>,
+}
+
+impl Sources {
+    pub fn new(frames: Box<dyn FrameSource>, inputs: Vec<Box<dyn InputSource>>, focus: Box<dyn FocusTracker>) -> Self {
+        Self { frames, inputs, focus, observer: None }
+    }
+    pub fn with_observer(mut self, observer: Observer) -> Self {
+        self.observer = Some(observer);
+        self
+    }
 }
 
 /// Tick timing: lateness of each tick relative to its scheduled deadline.
@@ -348,12 +385,13 @@ impl Recorder {
         let input = {
             let sh = shared.clone();
             let stop = input_stop.clone();
-            spawn("cap-input-gate", move || input_thread(sh, stop, in_rx, focus_rx, log_tx))
+            let observer = sources.observer.take();
+            spawn("cap-input-gate", move || input_thread(sh, stop, in_rx, focus_rx, log_tx, observer))
         };
 
         let mut rec = Recorder {
             shared: shared.clone(),
-            sources: Sources { frames: Box::new(NullSource), inputs: Vec::new(), focus: Box::new(NullFocus) },
+            sources: Sources::new(Box::new(NullSource), Vec::new(), Box::new(NullFocus)),
             input_stop,
             ticker: None,
             encoder: Some(encoder_h),
@@ -700,16 +738,23 @@ fn encoder_thread(sh: Arc<Shared>, mut enc: Box<dyn FrameEncoder>, rx: Receiver<
     for msg in rx.iter() {
         match msg {
             EncMsg::Frame { seg, t_start, frame, tick_ns, repeated } => {
-                if cur.map(|c| c.0) != Some(seg) {
+                let new_seg = cur.map(|c| c.0) != Some(seg);
+                if new_seg {
                     if let Some((old, frames)) = cur.take() {
                         // Shouldn't happen (End always precedes), but stay consistent.
                         send(WMsg::End { seg: old, t_end: tick_ns, dropped: 0, frames, flushed: false });
                     }
-                    send(WMsg::Start { seg, t_start, start_pts: next_pts, params: enc.params() });
                     cur = Some((seg, 0));
                 }
                 let (_, frames) = cur.as_mut().unwrap();
-                match enc.encode(&frame, next_pts, *frames == 0) {
+                let res = enc.encode(&frame, next_pts, *frames == 0);
+                if new_seg {
+                    // Sent after the first encode so `params` describe the
+                    // encoder that actually produced this segment's packets
+                    // (a lazily opened encoder, e.g. on the WGC D3D11 device).
+                    send(WMsg::Start { seg, t_start, start_pts: next_pts, params: enc.params() });
+                }
+                match res {
                     Ok(pkts) => {
                         let rec = FrameRecord { frame_idx: *frames, tick_ns, capture_ns: frame.capture_ns, repeated };
                         *frames += 1;
@@ -756,8 +801,14 @@ fn input_thread(
     in_rx: Receiver<InputEvent>,
     focus_rx: Receiver<FocusRecord>,
     log_tx: Sender<LogMsg>,
+    mut observer: Option<Observer>,
 ) {
     let mut gate = InputGate::new();
+    let mut observe = move |o: Observed<'_>| {
+        if let Some(f) = observer.as_mut() {
+            f(o);
+        }
+    };
     let mut gate_paused = false;
     let (mut in_rx, mut focus_rx) = (in_rx, focus_rx);
     let log = |m: LogMsg| {
@@ -790,10 +841,12 @@ fn input_thread(
         if stop.load(SeqCst) {
             // Drain what the (already stopped) sources delivered.
             while let Ok(r) = focus_rx.try_recv() {
+                observe(Observed::Focus(&r));
                 log_events(gate.set_focused(r.focused, r.t_ns));
                 log(LogMsg::Focus(r));
             }
             while let Ok(e) = in_rx.try_recv() {
+                observe(Observed::Input { event: &e, focused: gate.is_focused() });
                 if gate.admit(&e) {
                     log_events(vec![e]);
                 } else {
@@ -805,6 +858,7 @@ fn input_thread(
         select! {
             recv(focus_rx) -> r => match r {
                 Ok(r) => {
+                    observe(Observed::Focus(&r));
                     log_events(gate.set_focused(r.focused, r.t_ns));
                     log(LogMsg::Focus(r));
                 }
@@ -812,6 +866,7 @@ fn input_thread(
             },
             recv(in_rx) -> e => match e {
                 Ok(e) => {
+                    observe(Observed::Input { event: &e, focused: gate.is_focused() });
                     if gate.admit(&e) {
                         log_events(vec![e]);
                     } else {
@@ -879,6 +934,8 @@ struct Writer {
     /// Latest segment boundary seen (end of the newest closed segment).
     horizon: Nanos,
     focus_hist: Vec<FocusRecord>,
+    /// Held keys/buttons/axes at the end of the last handed-off segment.
+    carry: CarriedInputs,
 }
 
 impl Writer {
@@ -901,6 +958,7 @@ impl Writer {
             future: Vec::new(),
             horizon: Nanos::MIN,
             focus_hist: Vec::new(),
+            carry: CarriedInputs::default(),
         }
     }
 
@@ -1119,15 +1177,24 @@ impl Writer {
         if let Some(mut j) = s.journal.take() {
             let _ = j.flush();
         }
+        let mut inputs = std::mem::take(&mut s.inputs);
+        inputs.retain(|e| e.t_ns >= s.t_start && e.t_ns < t_end);
+        inputs.sort_by_key(|e| e.t_ns); // stable: keeps arrival order for equal stamps
+        // Re-emit what is still held from the previous segment at t_start,
+        // then carry this segment's end state to the next one.
+        let carried = self.carry.still_held(s.t_start);
+        for e in &inputs {
+            self.carry.observe(e);
+        }
         if !ok || s.frames.is_empty() {
             // Leave the .partial (with its journal) for recover_partials.
             self.sh.c.segment_errors.fetch_add(1, Relaxed);
             tracing::warn!(seg = s.idx, "segment not finalized; left as .partial");
             return;
         }
-        let mut inputs = std::mem::take(&mut s.inputs);
-        inputs.retain(|e| e.t_ns >= s.t_start && e.t_ns < t_end);
-        inputs.sort_by_key(|e| e.t_ns); // stable: keeps arrival order for equal stamps
+        if !carried.is_empty() {
+            inputs.splice(0..0, carried);
+        }
         let mut focus = vec![self.focus_at(s.t_start)];
         focus.extend(self.focus_hist.iter().filter(|r| r.t_ns >= s.t_start && r.t_ns < t_end).cloned());
         // Keep the focus history needed by later segments (state at t_end onward).
