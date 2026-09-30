@@ -240,7 +240,17 @@ impl FrameCtx {
         }
         let Some(frame) = frame else { return Ok(()) };
 
-        let capture_ns = system_relative_time_to_ns(frame.SystemRelativeTime()?);
+        // For DWM-composed (windowed) apps SystemRelativeTime is the upcoming
+        // composition time, up to a refresh interval *ahead* of now. The ticker
+        // needs capture_ns <= tick time, and a window that repaints continuously
+        // would then never yield an acceptable first frame. Clamp to arrival
+        // time; min() of two non-decreasing sequences stays monotonic.
+        let now_ns = cap_clock::now_ns();
+        let raw_ns = system_relative_time_to_ns(frame.SystemRelativeTime()?);
+        let capture_ns = raw_ns.min(now_ns);
+        if self.stats.frames.load(Ordering::Relaxed) == 0 {
+            tracing::debug!(raw_ns, now_ns, "first WGC frame");
+        }
         let content = frame.ContentSize()?;
         if content.Width <= 0 || content.Height <= 0 {
             // Minimised window.
@@ -473,6 +483,12 @@ impl FrameSource for WgcSource {
 
     fn stop(&mut self) {
         if let Some(r) = self.running.take() {
+            tracing::debug!(
+                frames = self.stats.frames.load(Ordering::Relaxed),
+                superseded = self.stats.superseded.load(Ordering::Relaxed),
+                errors = self.stats.errors.load(Ordering::Relaxed),
+                "WGC capture stopped"
+            );
             let _ = r.pool.RemoveFrameArrived(r.frame_token);
             let _ = r.item.RemoveClosed(r.closed_token);
             let _ = r.session.Close();

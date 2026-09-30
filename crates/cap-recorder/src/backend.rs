@@ -17,6 +17,11 @@ pub trait FrameEncoder: Send {
     /// frames (implementations may re-open internally); the next frame the
     /// recorder sends after a flush is always a forced keyframe.
     fn flush(&mut self) -> EncResult<Vec<EncodedPacket>>;
+    /// Open whatever `encode(frame)` would open lazily, ahead of time, so the
+    /// first encode of a segment doesn't stall the queue (and drop frames).
+    fn prepare(&mut self, _frame: &CapturedFrame) -> EncResult<()> {
+        Ok(())
+    }
 }
 
 /// Writes one segment's `video.mp4`.
@@ -80,6 +85,10 @@ impl FrameEncoder for FfmpegEncoder {
         self.params.clone()
     }
     fn encode(&mut self, frame: &CapturedFrame, pts: i64, force_keyframe: bool) -> EncResult<Vec<EncodedPacket>> {
+        self.prepare(frame)?;
+        self.inner.as_mut().unwrap().encode(frame, pts, force_keyframe)
+    }
+    fn prepare(&mut self, frame: &CapturedFrame) -> EncResult<()> {
         if self.inner.is_none() {
             let enc = self.open_for(frame)?;
             if enc.params().extradata != self.params.extradata {
@@ -88,7 +97,7 @@ impl FrameEncoder for FfmpegEncoder {
             self.params = enc.params().clone();
             self.inner = Some(enc);
         }
-        self.inner.as_mut().unwrap().encode(frame, pts, force_keyframe)
+        Ok(())
     }
     fn flush(&mut self) -> EncResult<Vec<EncodedPacket>> {
         match self.inner.take() {

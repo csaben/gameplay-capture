@@ -242,6 +242,9 @@ struct Shared {
     gate_closed_at: AtomicI64,
     /// Current ticker segment, -1 if none.
     current: AtomicI64,
+    /// The encoder has been opened for the capture's frames (see
+    /// `FrameEncoder::prepare`); the ticker opens no segment before that.
+    enc_ready: AtomicBool,
     last_error: Mutex<Option<String>>,
 }
 
@@ -330,6 +333,7 @@ impl Recorder {
             gate_closed_at: AtomicI64::new(Nanos::MIN),
             paused: cfg.paused.clone(),
             current: AtomicI64::new(-1),
+            enc_ready: AtomicBool::new(false),
             last_error: Mutex::new(None),
         });
 
@@ -380,7 +384,8 @@ impl Recorder {
         };
         let encoder_h = {
             let sh = shared.clone();
-            spawn("cap-encode", move || encoder_thread(sh, encoder, enc_rx, w_tx))
+            let latest = latest.clone();
+            spawn("cap-encode", move || encoder_thread(sh, encoder, latest, enc_rx, w_tx))
         };
         let input = {
             let sh = shared.clone();
@@ -628,6 +633,9 @@ impl Ticker {
             None if frame.capture_ns > t => return, // very first frame: wait a tick
             _ => (seq, frame),
         };
+        if self.seg.is_none() && !self.sh.enc_ready.load(SeqCst) {
+            return; // encoder still opening (first frame); no segment yet
+        }
         self.prev = Some((seq, frame.clone()));
         if self.seg.is_none() {
             self.seg = Some(TickSeg { idx: self.next_idx, t_start: t, slots: 0, dropped: 0, last_sent_seq: None });
@@ -723,7 +731,38 @@ fn ticker_thread(sh: Arc<Shared>, latest: Arc<LatestFrame>, tx: Sender<EncMsg>, 
 // ---------------------------------------------------------------------------
 // encoder
 
-fn encoder_thread(sh: Arc<Shared>, mut enc: Box<dyn FrameEncoder>, rx: Receiver<EncMsg>, tx: Sender<WMsg>) {
+/// Open the encoder for `frame` now (errors are left for `encode` to report).
+fn prepare_encoder(enc: &mut dyn FrameEncoder, frame: &CapturedFrame) {
+    let t = std::time::Instant::now();
+    match enc.prepare(frame) {
+        Ok(()) => tracing::debug!(ms = t.elapsed().as_millis() as u64, "encoder ready"),
+        Err(e) => tracing::warn!("pre-opening the encoder failed (retried on the first frame): {e}"),
+    }
+}
+
+fn encoder_thread(
+    sh: Arc<Shared>,
+    mut enc: Box<dyn FrameEncoder>,
+    latest: Arc<LatestFrame>,
+    rx: Receiver<EncMsg>,
+    tx: Sender<WMsg>,
+) {
+    // Warm up on the first captured frame before the ticker may open a segment:
+    // on Windows the real encoder can only be opened on the capture's D3D11
+    // device, and doing that inside the first encode stalls the queue long
+    // enough to drop the segment's first frames.
+    loop {
+        if let (_, Some(frame)) = latest.latest() {
+            prepare_encoder(enc.as_mut(), &frame);
+            break;
+        }
+        if sh.stop.load(SeqCst) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    sh.enc_ready.store(true, SeqCst);
+    let mut last_frame: Option<Arc<CapturedFrame>> = None;
     let mut next_pts: i64 = 0;
     // (segment idx, frames encoded in it)
     let mut cur: Option<(u32, u32)> = None;
@@ -748,6 +787,7 @@ fn encoder_thread(sh: Arc<Shared>, mut enc: Box<dyn FrameEncoder>, rx: Receiver<
                 }
                 let (_, frames) = cur.as_mut().unwrap();
                 let res = enc.encode(&frame, next_pts, *frames == 0);
+                last_frame = Some(frame.clone());
                 if new_seg {
                     // Sent after the first encode so `params` describe the
                     // encoder that actually produced this segment's packets
@@ -774,6 +814,10 @@ fn encoder_thread(sh: Arc<Shared>, mut enc: Box<dyn FrameEncoder>, rx: Receiver<
                     match enc.flush() {
                         Ok(p) => send_pkts(p),
                         Err(e) => sh.error(format!("encoder flush failed: {e}")),
+                    }
+                    // Paused: re-open now rather than on resume's first frame.
+                    if let (false, Some(f)) = (sh.stop.load(SeqCst), &last_frame) {
+                        prepare_encoder(enc.as_mut(), f);
                     }
                 }
                 match cur {
