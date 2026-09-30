@@ -7,6 +7,7 @@
   validate          validate segment folder(s) and print alignment stats
   load              loader smoke test (needs the `train` extra)
   action-spec       print the action vector layout as json
+  viewer            web UI: browse sessions (local / Garage) and play them with inputs
 
 Settings can also come from a TOML file (`--config pipeline.toml`) whose keys
 are the long option names with '_' (e.g. `input = "s3://gamecap/raw"`,
@@ -102,6 +103,19 @@ def build_parser() -> argparse.ArgumentParser:
     ld.add_argument("rest", nargs=argparse.REMAINDER)
 
     sub.add_parser("action-spec", help="print the action vector layout")
+
+    vw = sub.add_parser("viewer", help="web UI to browse and play sessions with their inputs")
+    vw.add_argument("--source", action="append", default=[], metavar="NAME=URL",
+                    help="session source: NAME=local dir (sessions root) or NAME=s3://bucket/prefix (repeatable)")
+    vw.add_argument("--gamecap-config", default=None,
+                    help="gamecap config.toml (or an add-client.sh snippet): adds 'garage' "
+                         "(s3://<bucket>/raw/, all users) and 'local' (its sessions dir, if present)")
+    vw.add_argument("--endpoint", default=None, help="S3 endpoint for --source s3://... (else GAMECAP_S3_ENDPOINT)")
+    vw.add_argument("--region", default=None)
+    vw.add_argument("--host", default="127.0.0.1")
+    vw.add_argument("--port", type=int, default=8787)
+    vw.add_argument("--cache-dir", default=None, help="remux/transcode cache (default: <tmp>/gamecap-viewer-cache)")
+    vw.add_argument("--list-ttl", type=float, default=30.0, help="seconds to cache store listings")
     return ap
 
 
@@ -207,6 +221,11 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "load":
         from .loader import main as load_main
         return load_main(a.rest)
+
+    if a.cmd == "viewer":
+        from .viewer import run as run_viewer
+        return run_viewer(a.source, a.gamecap_config, a.endpoint, a.region, a.host, a.port,
+                          a.cache_dir, a.list_ttl)
 
     if a.cmd == "action-spec":
         from .action_spec import default_spec

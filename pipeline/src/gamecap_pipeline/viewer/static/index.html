@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gamecap viewer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <button id="menuBtn" class="icon" title="Sessions" aria-label="Toggle session list">&#9776;</button>
+  <h1>gamecap <span>viewer</span></h1>
+  <label class="hdr">Source <select id="sourceSel"></select></label>
+  <button id="refreshBtn" title="Re-list the source">Refresh</button>
+  <label class="hdr">Video <select id="modeSel" title="raw = as recorded (HEVC fMP4), remux = faststart copy, h264 = transcoded for browsers without HEVC">
+    <option value="auto">auto</option><option value="raw">raw (HEVC)</option>
+    <option value="remux">remux (HEVC)</option><option value="h264">H.264</option>
+  </select></label>
+  <span id="codecNote" class="note"></span>
+</header>
+<div id="layout">
+  <aside id="sidebar">
+    <input id="filter" type="search" placeholder="Filter by game, user, session" autocomplete="off">
+    <div id="sessionList" class="list"></div>
+  </aside>
+  <main>
+    <div id="empty" class="emptyState">Pick a session on the left.</div>
+    <section id="player" hidden>
+      <div class="titleRow">
+        <h2 id="sessTitle"></h2>
+        <span id="sessMeta" class="meta"></span>
+      </div>
+      <div class="videoWrap">
+        <video id="video" playsinline muted preload="auto"></video>
+        <div id="videoMsg" class="videoMsg" hidden></div>
+        <div id="badges" class="badges"></div>
+      </div>
+      <div class="controls">
+        <button id="prevSeg" title="Previous segment ([)">&#9198;</button>
+        <button id="stepBack" title="Previous frame (,)">&#9664;&#9664;</button>
+        <button id="playBtn" title="Play / pause (space)">&#9654;</button>
+        <button id="stepFwd" title="Next frame (.)">&#9654;&#9654;</button>
+        <button id="nextSeg" title="Next segment (])">&#9197;</button>
+        <label class="speed">Speed <select id="speedSel">
+          <option>0.25</option><option>0.5</option><option selected>1</option><option>2</option><option>4</option>
+        </select></label>
+        <span id="frameInfo" class="frameInfo"></span>
+      </div>
+      <div id="segStrip" class="segStrip" title="Session: click to jump"></div>
+      <canvas id="spark" class="spark" height="56" title="Input activity in this segment: click to seek"></canvas>
+      <canvas id="overlay" class="overlay"></canvas>
+      <div id="textState" class="textState"></div>
+      <details id="infoBox">
+        <summary>Segment info</summary>
+        <div id="info" class="info"></div>
+      </details>
+    </section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

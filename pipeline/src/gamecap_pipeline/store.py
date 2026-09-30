@@ -122,7 +122,8 @@ class LocalStore(Store):
         return str(self._p(key))
 
 
-def s3_client(endpoint_url: str | None = None, region: str | None = None):
+def s3_client(endpoint_url: str | None = None, region: str | None = None,
+              access_key: str | None = None, secret_key: str | None = None):
     import boto3
     from botocore.config import Config
 
@@ -136,7 +137,8 @@ def s3_client(endpoint_url: str | None = None, region: str | None = None):
         request_checksum_calculation="when_required",
         response_checksum_validation="when_required",
     )
-    return boto3.client("s3", endpoint_url=endpoint_url, region_name=region, config=cfg)
+    creds = {"aws_access_key_id": access_key, "aws_secret_access_key": secret_key} if access_key else {}
+    return boto3.client("s3", endpoint_url=endpoint_url, region_name=region, config=cfg, **creds)
 
 
 class S3Store(Store):

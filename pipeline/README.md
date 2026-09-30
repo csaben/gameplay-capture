@@ -161,6 +161,74 @@ for frames, actions, meta in iterate_clips(urls, decode_device="cuda:0", num_wor
   `wds.split_by_node` is already in the pipeline for that. Other services
   share these GPUs, so pin with `CUDA_VISIBLE_DEVICES`.
 
+## Viewer
+
+`gamecap-pipeline viewer` is a small web UI (stdlib HTTP server + vanilla JS, no
+build step) for browsing recorded sessions and watching them with their inputs.
+It lists sessions from local session folders and/or the Garage bucket, plays a
+session segment by segment (auto-advancing), and draws a per-frame input panel
+under the video: keyboard with held keys lit, mouse buttons, a mouse-motion
+arrow, wheel, gamepad sticks/triggers/buttons, plus an activity sparkline
+(click to seek), unfocused spans and the manifest info. Frame k's inputs are
+the events in `[tick_ns[k], tick_ns[k+1]) + latency_offset_ns`.
+
+Keys: space play/pause, `,` / `.` one frame, `[` / `]` previous/next segment,
+←/→ one second. The URL hash (`#s=<source>&id=<session>&seg=<n>&f=<frame>`)
+links to a frame.
+
+```bash
+# inari: Garage (all users) + the local sessions dir, both from the gamecap config
+uv run gamecap-pipeline viewer --gamecap-config "$APPDATA/gamecap/config.toml" --cache-dir D:/gamecap/viewer-cache
+# -> http://127.0.0.1:8787/
+
+# any sources, named: local sessions roots or S3 prefixes (creds from AWS_* env)
+uv run gamecap-pipeline viewer --source local=D:/gamecap/sessions \
+    --source garage=s3://gameplay/raw/ --endpoint http://100.80.98.4:3900
+```
+
+Video modes (header "Video" menu): `auto` picks `remux` when the browser can
+play HEVC (Chrome/Edge with hardware decode), else `h264`. `remux` copies the
+segment into a faststart MP4 (no re-encode; gives the browser a real duration
+and instant seeking; the raw fragmented MP4 has no index). `h264` transcodes
+once for browsers without HEVC (Firefox, some Linux Chrome), trying
+h264_nvenc, libx264, h264_qsv/amf/mf, libopenh264, then mpeg4. Both need
+`ffmpeg` on PATH and are cached in `--cache-dir` (default
+`<tmp>/gamecap-viewer-cache`; on inari use D:). `raw` streams the stored file
+with HTTP Range (range GETs against S3). The next segment is converted in the
+background while the current one plays.
+
+API (JSON): `/api/sources`, `/api/sessions?source=S`, `/api/session?source=S&id=ID`,
+`/api/timeline?source=S&id=ID&seg=seg_000000`, `/video?source=S&id=ID&seg=SEG&mode=raw|remux|h264`.
+There is no auth: bind it to localhost or the tailnet only.
+
+### Hosting on cradle
+
+The pipeline key's snippet (`~/deploy/gameplay-garage/clients/pipeline.toml`) works as `--gamecap-config`.
+Bind the tailnet address (Garage there also only answers on it):
+
+```ini
+# ~/.config/systemd/user/gamecap-viewer.service
+[Unit]
+Description=gamecap session viewer
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/Code/gameplay-capture/pipeline
+ExecStartPre=/bin/sh -c 'until ip -4 addr show tailscale0 | grep -q 100.80.98.4; do sleep 2; done'
+ExecStart=/usr/local/bin/uv run gamecap-pipeline viewer \
+    --gamecap-config %h/deploy/gameplay-garage/clients/pipeline.toml \
+    --host 100.80.98.4 --port 8787 --cache-dir %h/.cache/gamecap-viewer
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+`systemctl --user daemon-reload && systemctl --user enable --now gamecap-viewer`
+(plus `loginctl enable-linger $USER` so it runs without a login), then open
+http://100.80.98.4:8787/ from any tailnet device. The cache holds one remuxed
+copy per viewed segment (about the segment size); clear it whenever.
+
 ## Tests
 
 ```bash
@@ -174,3 +242,4 @@ CUDA_VISIBLE_DEVICES=1 uv run pytest -q -m gpu
 - clip planning and cutting: every clip decodes to exactly 64 frames, starts on a keyframe and is pixel-identical to the source; mid-GOP re-encode
 - end to end: synth → process → shards → loader. Checks the actions against the reference and the scripted facts (for example E held on exactly frames 100–103), idempotent re-runs, shard rollover, deletions and rebuilds, rejected segments, and replay
 - S3 via an in-process moto server: raw layout, `pipe:` loader URLs, whole-user deletion
+- viewer: Range parsing, per-frame timeline windows (offset, carry-over, focus, gamepad), HTTP API, Range/416 on video, remux faststart
