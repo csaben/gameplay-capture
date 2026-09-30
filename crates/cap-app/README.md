@@ -37,6 +37,31 @@ FFmpeg: this build links the system FFmpeg (see `crates/cap-encode/README.md`). 
 ship the bundled LGPL FFmpeg 7.x with hardware encoders. `.cargo/config.toml` sets
 `BINDGEN_EXTRA_CLANG_ARGS` for the dev box.
 
+### Windows build
+
+Needs the VS 2022 Build Tools (MSVC), a **shared LGPL FFmpeg 7.1** dev build and **libclang <= 20**.
+
+- FFmpeg: BtbN `ffmpeg-n7.1-*-win64-lgpl-shared-7.1.zip` (the `latest` release only has 8.x+; take
+  one from a dated `autobuild-*` release). It has `include/`, `lib/*.lib` and the DLLs, with
+  nvenc/amf/qsv enabled. Point `FFMPEG_DIR` at it and put its `bin/` on `PATH` to run.
+- libclang: bindgen 0.70 (used by ffmpeg-sys-next 7.1) with LLVM 21+ turns `AVOption`,
+  `AVFormatContext` and others into opaque 1-byte structs, and the build fails with
+  `attempt to compute 1_usize - 64_usize` in the layout asserts. Use libclang 18, e.g. the
+  `libclang` PyPI wheel (`libclang-18.1.1-py2.py3-none-win_amd64.whl` is a zip holding
+  `clang/native/libclang.dll`). The wheel has no builtin headers, so pass any clang's
+  `lib/clang/<ver>/include` through `BINDGEN_EXTRA_CLANG_ARGS` (this also overrides the Linux path
+  in `.cargo/config.toml`).
+
+```bash
+export FFMPEG_DIR='D:\depsfmpeg-7.1'
+export LIBCLANG_PATH='D:\deps\libclang18\libclang-18.1.1.data\platlib\clang
+ative'
+export BINDGEN_EXTRA_CLANG_ARGS='-ID:/deps/clang-include'   # copy of LLVM's lib/clang/22/include
+export PATH="/d/deps/ffmpeg-7.1/bin:$PATH"
+cargo build --release -p cap-app --features tray
+cargo test --release --workspace
+```
+
 ## Setup per platform
 
 ### Windows 10/11
@@ -234,7 +259,8 @@ ambiguous trials, median/p90, luma of CPU frames, offset sign).
 | | |
 |---|---|
 | Linux, synthetic source + NVENC + Garage upload + Python pipeline | **Tested end to end** on the Ubuntu box |
-| Windows (WGC, Raw Input, D3D11 encoder path, tray, calibration readback) | type-checked (`cargo check --target x86_64-pc-windows-msvc --features tray`), untested |
+| Windows 10 + GTX 1070: WGC real window, D3D11 VP -> hevc_nvenc, Raw Input keyboard/mouse, gilrs, focus gate, pause key | **Tested** (short runs of Chrome/Notepad; segments pass `gamecap-pipeline validate`); workspace tests and ignored NVENC/crash-recovery tests pass |
+| Windows tray, calibration window, AMF/QSV, 2-hour game session | built, not run |
 | macOS (SCK, IOHID, VT, tray, calibration readback) | type-checked for `aarch64-apple-darwin`, untested |
 | Linux X11 real window, evdev, calibration window | built, not run (the box has no display) |
 | `pipewire` feature (portal token persistence) | not compiled here (no libpipewire-dev) |

@@ -54,7 +54,7 @@ RGB->YUV uses BT.601, so swscale, the D3D11 VP and the VT transfer are configure
 | CPU -> hevc_vaapi | `hwupload` -> `scale_vaapi=format=nv12` | compile-only (no VAAPI encode on the dev box) |
 | DMA-BUF -> hevc_vaapi | DRM PRIME frame -> `hwmap` (VAAPI device) -> `scale_vaapi` | compile-only, **untested** |
 | DMA-BUF -> hevc_nvenc | DRM PRIME -> `av_hwframe_map` to CPU (linear modifier only) -> CPU path | compile-only, **untested**; zero-copy CUDA import is a TODO |
-| D3D11 texture -> nvenc/amf/qsv (Windows) | AVD3D11VA device on the WGC device; `VideoProcessorBlt` BGRA/FP16 -> NV12 texture from the encoder's pool (BindFlags=RENDER_TARGET) | type-checked only, **untested** |
+| D3D11 texture -> nvenc/amf/qsv (Windows) | AVD3D11VA device on the WGC device; `VideoProcessorBlt` BGRA/FP16 -> NV12 texture from the encoder's pool (BindFlags=RENDER_TARGET) | **Tested** (Windows 10, GTX 1070, real WGC window) |
 | CVPixelBuffer -> hevc_videotoolbox | `VTPixelTransferSessionTransferImage` into a VT pool buffer | type-checked only, **untested** |
 
 `scale_cuda` in FFmpeg 6.1/7.x cannot convert RGB to YUV ("Unsupported conversion: bgr0 -> nv12"), which
@@ -88,6 +88,9 @@ if hevc_nvenc cannot open.
 - Throughput (release, hevc_nvenc, CPU BGRA in, 640x360 out, synchronous `delay=0`):
   720p 1063 fps (0.94 ms/frame), 1080p 634 fps (1.58 ms), 1440p 400 fps (2.50 ms).
   CPU fallback (swscale + upload), 1080p RGBA: 118 fps (8.5 ms).
+
+On Windows (GTX 1070, FFmpeg 7.1.5 LGPL shared) all encoder tests pass. CPU frames there take
+swscale + upload into the D3D11 pool (`cpu:swscale+hwupload`); GPU scaling is the D3D11 VP for WGC textures.
 
 Cross-platform type-check: `scripts/xcheck.sh` runs `cargo check` for `x86_64-pc-windows-msvc` and
 `aarch64-apple-darwin` against the Linux-generated FFmpeg bindings. Both pass with no warnings.

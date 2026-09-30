@@ -182,7 +182,10 @@ fn nvenc_two_segments_ffprobe() {
     // 3 s at 20 Hz; segment boundary at 2 s (a GOP boundary, as in production
     // where 60 s segments are a multiple of the 1 s GOP).
     let segs = record(&mut enc, &dir, 1280, 720, 60, &[40]);
-    assert_eq!(enc.last_frame_path(), Some("gpu:hwupload+scale_cuda"), "GPU scale path used");
+    // Windows NVENC runs on a D3D11 device: CPU frames take swscale + upload (GPU
+    // scaling there is the D3D11 VP, which needs a texture input).
+    let want = if cfg!(windows) { "cpu:swscale+hwupload" } else { "gpu:hwupload+scale_cuda" };
+    assert_eq!(enc.last_frame_path(), Some(want), "expected scale path used");
     verify_segments(&segs, "hevc", 20, &[40, 20]);
     verify_truncated(&segs[0].0, 0.7, 20);
     let _ = std::fs::remove_dir_all(&dir);

@@ -39,7 +39,11 @@ Garage → pipeline → shards → replay, crash recovery, disk cap, blocklist,
 consent. X11 capture and focus verified under Xvfb; PipeWire SHM stream
 verified against a GStreamer node.
 
-Compile-checked only: Windows (WGC, D3D11 video processor, Raw Input,
-WinEvent focus), macOS (ScreenCaptureKit, VideoToolbox, IOHIDManager),
-Linux DMA-BUF / VAAPI / portal paths, calibration window, tray. M0 (Windows +
-NVENC, 2-hour session) still needs a real run on a Windows gaming machine.
+Verified on Windows 10 (GTX 1070, FFmpeg 7.1 LGPL): WGC window capture ->
+D3D11 video processor -> hevc_nvenc (zero copy), Raw Input keyboard/mouse scan
+codes, gilrs gamepad, WinEvent focus gate, pause key, segments pass
+`gamecap-pipeline validate`. Windows build setup: [cap-app README](crates/cap-app/README.md#windows-build).
+
+Compile-checked only: macOS (ScreenCaptureKit, VideoToolbox, IOHIDManager),
+Linux DMA-BUF / VAAPI / portal paths, calibration window, tray. M0 still needs a
+2-hour session in a real game.
